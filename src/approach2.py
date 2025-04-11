@@ -1,3 +1,4 @@
+
 import os
 import numpy as np
 import rasterio
@@ -35,6 +36,7 @@ PARAMS = {
 
 # ==================== ENHANCED CORE FUNCTIONS ====================
 def load_and_resize_band(band_key, scene_dir, reference_meta=None):
+    """Load and resize band to match reference dimensions"""
     matches = glob.glob(os.path.join(scene_dir, BAND_PATTERNS[band_key]))
     if not matches:
         available = [f for f in os.listdir(scene_dir) if f.endswith('.TIF')]
@@ -45,8 +47,10 @@ def load_and_resize_band(band_key, scene_dir, reference_meta=None):
 
     with rasterio.open(file_path) as src:
         if reference_meta is None:
+            # First image - return as is
             return src.read(1).astype(np.float32), src.meta
         else:
+            # Resize to match reference image
             data = np.empty((reference_meta['height'], reference_meta['width']), dtype=np.float32)
             reproject(
                 rasterio.band(src, 1),
@@ -61,6 +65,7 @@ def load_and_resize_band(band_key, scene_dir, reference_meta=None):
 
 
 def compute_indices(green, nir, blue, swir1):
+    """Calculate all spectral indices with safe division"""
     with np.errstate(divide='ignore', invalid='ignore'):
         ndwi = (green - nir) / (green + nir)
         fmpi = (swir1 - (blue + green)) / (swir1 + (blue + green))
@@ -70,53 +75,54 @@ def compute_indices(green, nir, blue, swir1):
     }
 
 
-def classify_pollution(ndwi, fmpi):
-    water_mask = ndwi > -0.1
+def classify_pollution(fmpi, ndwi):
+    """Classify microplastic pollution risk levels with water masking"""
+    water_mask = ndwi > PARAMS["water_threshold"]
+    masked_fmpi = np.where(water_mask, fmpi, 0)
 
-    low = (fmpi > 0.05) & (fmpi <= 0.1)
-    medium = (fmpi > 0.1) & (fmpi <= 0.2)
-    high = fmpi > 0.2
+    classified = np.zeros_like(masked_fmpi, dtype=np.uint8)
+    thresholds = PARAMS["risk_thresholds"]
 
-    classified = np.zeros_like(fmpi, dtype=np.uint8)
-    classified[water_mask & low] = 1
-    classified[water_mask & medium] = 2
-    classified[water_mask & high] = 3
+    classified[(masked_fmpi > thresholds["low"][0]) &
+               (masked_fmpi <= thresholds["low"][1])] = 1
+    classified[(masked_fmpi > thresholds["medium"][0]) &
+               (masked_fmpi <= thresholds["medium"][1])] = 2
+    classified[masked_fmpi > thresholds["high"][0]] = 3
 
     return classified
 
 
 # ==================== VISUALIZATION ====================
-def create_plot(data, title, filename, cmap='viridis'):
-    plt.figure(figsize=(10, 8), dpi=120)
-    plt.title(title, fontsize=14)
+def create_plot(data, title, filename, cmap="viridis", colorbar=True):
+    """Generate and save visualization plots"""
+    plt.figure(figsize=(12, 10))
 
     if isinstance(cmap, ListedColormap):
         masked = ma.masked_where(data == 0, data)
-        plt.imshow(masked, cmap=cmap)
-        cbar = plt.colorbar(shrink=0.7)
-        cbar.set_ticks([1, 2, 3])
-        cbar.set_ticklabels(['Low', 'Medium', 'High'])
+        img = plt.imshow(masked, cmap=cmap)
     else:
-        # Contrast enhancement for continuous data
-        p2, p98 = np.percentile(data[data > 0], (2, 98))
-        plt.imshow(np.clip(data, p2, p98), cmap=cmap)
-        plt.colorbar(shrink=0.7)
+        img = plt.imshow(data, cmap=cmap)
 
-    plt.axis('off')
+    if colorbar:
+        cbar = plt.colorbar(img)
+        if cmap == "RdYlGn_r":
+            cbar.set_label('Plastic Index Value')
+
+    plt.title(title, fontsize=14, pad=20)
+    plt.axis("off")
     plt.tight_layout()
-    save_path = os.path.join(PATHS['output'], filename)
-    plt.savefig(save_path, bbox_inches='tight', dpi=150)
+    plt.savefig(os.path.join(PATHS["output"], filename), dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Saved plot: {filename}")
-
 
 
 # ==================== ANALYSIS PIPELINE ====================
 def analyze_scene(scene_dir, scene_name, reference_meta=None):
+    """Complete processing pipeline for one scene with resizing"""
     print(f"\n{'=' * 50}")
     print(f"PROCESSING: {scene_name.upper()} SCENE")
     print(f"Directory: {scene_dir}")
 
+    # Load all bands with consistent sizing
     print("\nLoading and resizing bands...")
     blue, meta = load_and_resize_band("blue", scene_dir, reference_meta)
     green, _ = load_and_resize_band("green", scene_dir, meta)
@@ -124,20 +130,25 @@ def analyze_scene(scene_dir, scene_name, reference_meta=None):
     nir, _ = load_and_resize_band("nir", scene_dir, meta)
     swir1, _ = load_and_resize_band("swir1", scene_dir, meta)
 
+    # Compute indices
     print("Calculating indices...")
     indices = compute_indices(green, nir, blue, swir1)
 
+    # Classify pollution
     print("Classifying pollution levels...")
-    classified = classify_pollution(indices["ndwi"], indices["fmpi"])
+    classified = classify_pollution(indices["fmpi"], indices["ndwi"])
 
+    # Generate visualizations
     print("Creating visualizations...")
     colors = ['black', '#56b1f7', '#f7c842', '#e73030']
     cmap_custom = ListedColormap(colors)
 
     create_plot(indices["ndwi"], f"NDWI - {scene_name}", f"ndwi_{scene_name}.png", "Blues")
-    create_plot(indices["fmpi"], f"FMPI - {scene_name}", f"fmpi_{scene_name}.png", "plasma")
-    create_plot(classified, f"Microplastic Risk - {scene_name}", f"risk_{scene_name}.png", cmap_custom)
+    create_plot(indices["fmpi"], f"FMPI - {scene_name}", f"fmpi_{scene_name}.png", "inferno")
+    create_plot(classified, f"Microplastic Risk - {scene_name}",
+                f"risk_{scene_name}.png", cmap_custom)
 
+    # Calculate statistics
     stats = {
         "low_risk": np.sum(classified == 1),
         "medium_risk": np.sum(classified == 2),
@@ -150,16 +161,22 @@ def analyze_scene(scene_dir, scene_name, reference_meta=None):
 
 
 def compare_results(pre, post):
+    """Compare pre and post Kumbh results with size validation"""
     print("\nCOMPARING RESULTS...")
 
+    # Verify shapes match
     if pre["classified"].shape != post["classified"].shape:
         raise ValueError(f"Shape mismatch: pre {pre['classified'].shape} vs post {post['classified'].shape}")
 
+    # Calculate change detection
     change = post["classified"] - pre["classified"]
     increased = (change > 0).astype(int)
 
-    create_plot(increased, "Areas of Increased Microplastic Pollution", "pollution_increase.png", "coolwarm")
+    # Create comparison plot
+    create_plot(increased, "Areas of Increased Microplastic Pollution",
+                "pollution_increase.png", "Reds")
 
+    # Generate statistics
     comparison_stats = {
         "new_high_risk": np.sum((pre["classified"] < 3) & (post["classified"] == 3)),
         "total_increase": np.sum(increased),
@@ -175,9 +192,15 @@ if __name__ == "__main__":
     os.makedirs(PATHS["output"], exist_ok=True)
 
     try:
+        # Process pre-Kumbh scene first (will set reference size)
         pre = analyze_scene(PATHS["pre_kumbh"], "pre_kumbh")
+
+        # Process post-Kumbh scene using pre-Kumbh as reference
         post = analyze_scene(PATHS["post_kumbh"], "post_kumbh", pre["meta"])
+
+        # Compare results
         comparison = compare_results(pre, post)
+
         # ==================== RANDOM FOREST CLASSIFICATION ====================
         from sklearn.ensemble import RandomForestClassifier
         from sklearn.metrics import accuracy_score, classification_report
@@ -215,7 +238,7 @@ if __name__ == "__main__":
         print("Accuracy:", accuracy_score(y_test, y_pred))
         print("\nClassification Report:\n", classification_report(y_test, y_pred))
 
-
+        # Generate final report
         print("\n\nFINAL RESULTS:")
         print(f"Pre-Kumbh High Risk Areas: {pre['stats']['high_risk']} pixels")
         print(f"Post-Kumbh High Risk Areas: {post['stats']['high_risk']} pixels")

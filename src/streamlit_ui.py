@@ -34,7 +34,7 @@ if st.button("🚀 Run Analysis"):
                 image_path = os.path.join(PATHS["output"], filename)
                 if os.path.exists(image_path):
                     st.image(Image.open(image_path), caption=filename.replace("_", " ").replace(".png", "").title(),
-                             use_column_width=True)
+                             use_container_width=True)
                 else:
                     st.warning(f"Missing: {filename}")
 
@@ -42,4 +42,4 @@ if st.button("🚀 Run Analysis"):
             st.error(f"❌ Error occurred: {str(e)}")
 
 st.markdown("---")
-st.caption("Built with ❤️ using Streamlit")
+
