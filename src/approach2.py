@@ -25,7 +25,7 @@ BAND_PATTERNS = {
 
 PARAMS = {
     "target_resolution": 30,  # meters
-    "water_threshold": 0.2,
+    "water_threshold": 0.1,
     "risk_thresholds": {
         "low": (0.05, 0.15),
         "medium": (0.15, 0.25),
@@ -114,6 +114,19 @@ def create_plot(data, title, filename, cmap="viridis", colorbar=True):
     plt.savefig(os.path.join(PATHS["output"], filename), dpi=300, bbox_inches='tight')
     plt.close()
 
+def save_geotiff(output_path, data_array, meta, dtype=rasterio.uint8):
+    """Save the given array as a GeoTIFF file with the provided metadata"""
+    meta = meta.copy()
+    meta.update({
+        "driver": "GTiff",
+        "dtype": dtype,
+        "count": 1,
+        "compress": "lzw"
+    })
+
+    with rasterio.open(output_path, "w", **meta) as dst:
+        dst.write(data_array.astype(dtype), 1)
+
 
 # ==================== ANALYSIS PIPELINE ====================
 def analyze_scene(scene_dir, scene_name, reference_meta=None):
@@ -148,6 +161,13 @@ def analyze_scene(scene_dir, scene_name, reference_meta=None):
     create_plot(classified, f"Microplastic Risk - {scene_name}",
                 f"risk_{scene_name}.png", cmap_custom)
 
+    # Save results as GeoTIFFs
+    print("Saving GeoTIFF outputs...")
+    save_geotiff(os.path.join(PATHS["output"], f"ndwi_{scene_name}.tif"), indices["ndwi"], meta, dtype=rasterio.float32)
+    save_geotiff(os.path.join(PATHS["output"], f"fmpi_{scene_name}.tif"), indices["fmpi"], meta, dtype=rasterio.float32)
+    save_geotiff(os.path.join(PATHS["output"], f"risk_{scene_name}.tif"), classified, meta, dtype=rasterio.uint8)
+
+
     # Calculate statistics
     stats = {
         "low_risk": np.sum(classified == 1),
@@ -175,6 +195,9 @@ def compare_results(pre, post):
     # Create comparison plot
     create_plot(increased, "Areas of Increased Microplastic Pollution",
                 "pollution_increase.png", "Reds")
+    # Save the change detection result as GeoTIFF
+    save_geotiff(os.path.join(PATHS["output"], "pollution_increase.tif"), increased, pre["meta"], dtype=rasterio.uint8)
+
 
     # Generate statistics
     comparison_stats = {
@@ -214,6 +237,9 @@ if __name__ == "__main__":
         ), axis=1)
         y_train = pre["classified"].flatten()
 
+        unique, counts = np.unique(y_train, return_counts=True)
+        print("Label distribution in training data:", dict(zip(unique, counts)))
+
         # Filter out non-water or non-risk areas (label 0)
         mask = y_train > 0
         X_train = X_train[mask]
@@ -228,6 +254,9 @@ if __name__ == "__main__":
             post["indices"]["fmpi"].flatten()
         ), axis=1)
         y_test = post["classified"].flatten()
+        unique, counts = np.unique(y_test, return_counts=True)
+        print("Label distribution in training data:", dict(zip(unique, counts)))
+
         mask_test = y_test > 0
         X_test = X_test[mask_test]
         y_test = y_test[mask_test]
