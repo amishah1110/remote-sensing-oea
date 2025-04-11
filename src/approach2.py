@@ -26,11 +26,12 @@ PARAMS = {
     "target_resolution": 30,  # meters
     "water_threshold": 0.2,
     "risk_thresholds": {
-        "low": (0.001, 0.05),
-        "medium": (0.051, 0.25),
+        "low": (0.05, 0.15),
+        "medium": (0.15, 0.25),
         "high": (0.25, 1.0)
     }
 }
+
 
 def load_and_resize_band(band_key, scene_dir, reference_meta=None):
     matches = glob.glob(os.path.join(scene_dir, BAND_PATTERNS[band_key]))
@@ -71,43 +72,68 @@ def compute_indices(green, nir, blue, swir1):
 
 
 def classify_pollution(fmpi, ndwi):
-    water_mask = ndwi > PARAMS["water_threshold"]
-    masked_fmpi = np.where(water_mask, fmpi, 0)
+    # water_mask = ndwi > PARAMS["water_threshold"]
+    # masked_fmpi = np.where(water_mask, fmpi, 0)
 
-    classified = np.zeros_like(masked_fmpi, dtype=np.uint8)
-    thresholds = PARAMS["risk_thresholds"]
+    water_mask = ndwi > -0.1
 
-    classified[(masked_fmpi > thresholds["low"][0]) &
-               (masked_fmpi <= thresholds["low"][1])] = 1
-    classified[(masked_fmpi > thresholds["medium"][0]) &
-               (masked_fmpi <= thresholds["medium"][1])] = 2
-    classified[masked_fmpi > thresholds["high"][0]] = 3
+    # classified = np.zeros_like(masked_fmpi, dtype=np.uint8)
+    # thresholds = PARAMS["risk_thresholds"]
+    low = (fmpi > 0.05) & (fmpi <= 0.1)
+    medium = (fmpi > 0.1) & (fmpi <= 0.2)
+    high = fmpi > 0.2
+    # classified[(masked_fmpi > thresholds["low"][0]) &
+    #            (masked_fmpi <= thresholds["low"][1])] = 1
+    # classified[(masked_fmpi > thresholds["medium"][0]) &
+    #            (masked_fmpi <= thresholds["medium"][1])] = 2
+    # classified[masked_fmpi > thresholds["high"][0]] = 3
+
+    classified = np.zeros_like(fmpi, dtype=np.uint8)
+    classified[water_mask & low] = 1
+    classified[water_mask & medium] = 2
+    classified[water_mask & high] = 3
 
     return classified
 
 
-# VISUALIZATION
-def create_plot(data, title, filename, cmap="viridis", colorbar=True):
-    """Generate and save visualization plots with improved settings"""
-    plt.figure(figsize=(12, 10), dpi=300)
+def save_as_tif(data, meta, title, filename):
+    """Save data as GeoTIFF with proper metadata"""
+    output_path = os.path.join(PATHS["output"], filename)
 
-    # Debug information
+    # Update metadata for the output file
+    out_meta = meta.copy()
+    out_meta.update({
+        'driver': 'GTiff',
+        'dtype': 'float32' if data.dtype == np.float32 else 'uint8',
+        'count': 1,
+        'nodata': None
+    })
+
+    with rasterio.open(output_path, 'w', **out_meta) as dst:
+        dst.write(data, 1)
+
+    print(f"Saved {title} to: {output_path}")
+
+
+def create_plot(data, meta, title, filename, cmap="viridis", colorbar=True):
+    # First save the raw data as TIFF
+    tif_filename = filename.replace('.png', '.tif') if filename.endswith('.png') else filename
+    save_as_tif(data, meta, title, tif_filename)
+
+    # Then create and save the visualization as PNG (optional)
+    plt.figure(figsize=(12, 10), dpi=300)
     print(f"\nCreating {filename}:")
     print(f"- Data range: {np.nanmin(data)} to {np.nanmax(data)}")
     print(f"- Unique values: {np.unique(data)}")
 
     if isinstance(cmap, ListedColormap):
-        # For classification plots
         masked = ma.masked_where(data == 0, data)
-        img = plt.imshow(masked, cmap=cmap, interpolation='nearest',
-                         vmin=1, vmax=3)  # Ensure correct value range
-
+        img = plt.imshow(masked, cmap=cmap, interpolation='nearest', vmin=1, vmax=3)
         if colorbar:
             cbar = plt.colorbar(img, ticks=[1, 2, 3], fraction=0.046, pad=0.04)
             cbar.ax.set_yticklabels(['Low', 'Medium', 'High'])
             cbar.set_label('Pollution Risk Level', rotation=270, labelpad=15)
     else:
-        # For continuous data plots
         img = plt.imshow(data, cmap=cmap)
         if colorbar:
             cbar = plt.colorbar(img, fraction=0.046, pad=0.04)
@@ -115,12 +141,9 @@ def create_plot(data, title, filename, cmap="viridis", colorbar=True):
 
     plt.title(title, fontsize=14, pad=20)
     plt.axis("off")
-
-    # Save with tight layout
-    output_path = os.path.join(PATHS["output"], filename)
-    plt.savefig(output_path, bbox_inches='tight', pad_inches=0.1, dpi=300)
+    png_filename = filename.replace('.tif', '.png') if filename.endswith('.tif') else filename + '.png'
+    plt.savefig(os.path.join(PATHS["output"], png_filename), bbox_inches='tight', pad_inches=0.1, dpi=300)
     plt.close()
-    print(f"Saved visualization to: {output_path}")
 
 
 # ANALYSIS PIPELINE
@@ -147,13 +170,13 @@ def analyze_scene(scene_dir, scene_name, reference_meta=None):
 
     # Generate visualizations
     print("Creating visualizations...")
-    colors = ['black', '#56b1f7', '#f7c842', '#e73030']  # Black for non-water, then blue->yellow->red
+    colors = ['black', '#56b1f7', '#f7c842', '#e73030']
     cmap_custom = ListedColormap(colors)
 
-    create_plot(indices["ndwi"], f"NDWI - {scene_name}", f"ndwi_{scene_name}.png", "Blues")
-    create_plot(indices["fmpi"], f"FMPI - {scene_name}", f"fmpi_{scene_name}.png", "inferno")
-    create_plot(classified, f"Microplastic Risk - {scene_name}",
-                f"risk_{scene_name}.png", cmap_custom)
+    create_plot(indices["ndwi"], meta, f"NDWI - {scene_name}", f"ndwi_{scene_name}.tif", "Blues")
+    create_plot(indices["fmpi"], meta, f"FMPI - {scene_name}", f"fmpi_{scene_name}.tif", "inferno")
+    create_plot(classified, meta, f"Microplastic Risk - {scene_name}",
+                f"risk_{scene_name}.tif", cmap_custom)
 
     # Calculate statistics
     stats = {
@@ -177,26 +200,21 @@ def compare_results(pre, post):
 
     # Calculate change detection with enhanced method
     change = post["classified"] - pre["classified"]
-    increased = (change > 0).astype(float)  # Use float for better visualization
+    increased = (change > 0).astype(float)
 
-    # Debug information
-    print(f"Change detection stats:")
-    print(f"- Pixels with increased risk: {np.sum(increased > 0)}")
-    print(f"- Change values distribution: {np.unique(change, return_counts=True)}")
-
-    # Create comparison plot with improved settings
-    create_plot(increased, "Areas of Increased Microplastic Pollution",
-                "pollution_increase.png", "RdYlGn_r")  # Reversed Red-Yellow-Green colormap
+    # Save the comparison as TIFF
+    save_as_tif(increased, pre["meta"], "Areas of Increased Microplastic Pollution", "pollution_increase.tif")
 
     # Generate statistics
     comparison_stats = {
         "new_high_risk": np.sum((pre["classified"] < 3) & (post["classified"] == 3)),
         "total_increase": np.sum(increased),
         "percent_change": round((post["stats"]["high_risk"] - pre["stats"]["high_risk"]) /
-                                max(1, pre["stats"]["total_water"]) * 100, 2)  # Avoid division by zero
+                                max(1, pre["stats"]["total_water"]) * 100, 2)
     }
 
     return comparison_stats
+
 
 
 # MAIN METHOD
@@ -215,6 +233,43 @@ if __name__ == "__main__":
         # Compare results
         print("\nComparing results...")
         comparison = compare_results(pre, post)
+
+        # ==================== RANDOM FOREST CLASSIFICATION ====================
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.metrics import accuracy_score, classification_report
+
+        print("\nTRAINING RANDOM FOREST ON PRE-KUMBH DATA...")
+
+        # Prepare training data (flattened)
+        X_train = np.stack((
+            pre["indices"]["ndwi"].flatten(),
+            pre["indices"]["fmpi"].flatten()
+        ), axis=1)
+        y_train = pre["classified"].flatten()
+
+        # Filter out non-water or non-risk areas (label 0)
+        mask = y_train > 0
+        X_train = X_train[mask]
+        y_train = y_train[mask]
+
+        model = RandomForestClassifier(n_estimators=100, random_state=42)
+        model.fit(X_train, y_train)
+
+        print("Predicting on POST-KUMBH data...")
+        X_test = np.stack((
+            post["indices"]["ndwi"].flatten(),
+            post["indices"]["fmpi"].flatten()
+        ), axis=1)
+        y_test = post["classified"].flatten()
+        mask_test = y_test > 0
+        X_test = X_test[mask_test]
+        y_test = y_test[mask_test]
+
+        y_pred = model.predict(X_test)
+
+        print("\n=== RANDOM FOREST EVALUATION ===")
+        print("Accuracy:", accuracy_score(y_test, y_pred))
+        print("\nClassification Report:\n", classification_report(y_test, y_pred))
 
         # Generate final report
         print("\n\nFINAL RESULTS:")
