@@ -23,7 +23,8 @@ BAND_INFO = {
     "B3": {"name": "Green", "wavelength": "0.53-0.59μm", "color": "green"},
     "B4": {"name": "Red", "wavelength": "0.64-0.67μm", "color": "red"},
     "B5": {"name": "NIR", "wavelength": "0.85-0.88μm", "color": "darkred"},
-    "B6": {"name": "SWIR1", "wavelength": "1.57-1.65μm", "color": "gray"}
+    "B6": {"name": "SWIR1", "wavelength": "1.57-1.65μm", "color": "gray"},
+    "B10": {"name": "Thermal", "wavelength": "10.6-11.2μm", "color": "magenta"}
 }
 
 
@@ -42,7 +43,6 @@ def load_band(band_key, scene_dir):
 
 
 def run_band_analysis(scene_dir, output_dir):
-    """Perform complete band analysis"""
     os.makedirs(output_dir, exist_ok=True)
 
     # Load and process bands
@@ -217,11 +217,13 @@ with tab2:
 
                 result_images = [
                     ("NDWI (Pre-Kumbh)", "ndwi_pre_kumbh.png"),
-                    ("FMPI (Pre-Kumbh)", "fmpi_pre_kumbh.png"),
-                    ("Risk Map (Pre-Kumbh)", "risk_pre_kumbh.png"),
                     ("NDWI (Post-Kumbh)", "ndwi_post_kumbh.png"),
+                    ("FMPI (Pre-Kumbh)", "fmpi_pre_kumbh.png"),
                     ("FMPI (Post-Kumbh)", "fmpi_post_kumbh.png"),
+                    ("Risk Map (Pre-Kumbh)", "risk_pre_kumbh.png"),
                     ("Risk Map (Post-Kumbh)", "risk_post_kumbh.png"),
+                    ("Turbidity Map (Pre-Kumbh", "turbidity_pre_kumbh.png"),
+                    ("Turbidity Map (Post-Kumbh", "turbidity_post_kumbh.png"),
                     ("Pollution Increase", "pollution_increase.png")
                 ]
 
@@ -239,17 +241,3 @@ with tab2:
                 st.error(f"❌ Error occurred: {str(e)}")
 
 st.markdown("---")
-st.markdown("""
-### Key Scientific Conclusions
-1. **Band Selection**:  
-   - Green (B3) + NIR (B5) provides optimal water detection (NDWI)
-   - SWIR1 (B6) is essential for microplastic detection (FMPI)
-
-2. **Pollution Patterns**:  
-   - High-risk areas correlate with human activity zones
-   - Post-event images show significant pollution increases
-
-3. **Method Validation**:  
-   - Spectral characteristics confirm theoretical expectations
-   - Index combinations show strong discrimination capability
-""")
