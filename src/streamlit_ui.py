@@ -14,7 +14,7 @@ import gc
 # Set up the Streamlit interface
 st.set_page_config(page_title="Microplastic Pollution Detection", layout="centered")
 
-st.title("🛰 Microplastic Pollution Detection from Remote Sensing Data")
+st.title("🛰️ Microplastic Pollution Detection from Remote Sensing Data")
 st.markdown("Analyze and compare pre- and post-Kumbh satellite imagery to detect microplastic risks.")
 
 # Band information
@@ -26,7 +26,6 @@ BAND_INFO = {
     "B6": {"name": "SWIR1", "wavelength": "1.57-1.65μm", "color": "gray"},
     "B10": {"name": "Thermal", "wavelength": "10.6-11.2μm", "color": "magenta"}
 }
-
 
 def load_band(band_key, scene_dir):
     """Load a single band with memory efficiency"""
@@ -45,7 +44,6 @@ def load_band(band_key, scene_dir):
         if band_key == "B10":  # Thermal is optional
             return None
         raise
-
 
 def run_band_analysis(scene_dir, output_dir):
     os.makedirs(output_dir, exist_ok=True)
@@ -76,7 +74,6 @@ def run_band_analysis(scene_dir, output_dir):
     # Create visualizations
     create_band_visualizations(bands, output_dir)
     return bands, stats_df
-
 
 def create_band_visualizations(bands, output_dir):
     """Generate all band analysis plots"""
@@ -134,7 +131,6 @@ def create_band_visualizations(bands, output_dir):
     plt.title('Inter-band Correlation Matrix', fontsize=14)
     plt.savefig(os.path.join(output_dir, 'band_correlations.png'), dpi=300, bbox_inches='tight')
     plt.close()
-
 
 # Tab layout
 tab1, tab2 = st.tabs(["🏞️ Band Analysis", "📊 Pollution Detection"])

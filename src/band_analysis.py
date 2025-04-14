@@ -26,7 +26,6 @@ BAND_INFO = {
 }
 
 def get_band_stats(data, band_key):
-    """Calculate statistics for a band using chunking"""
     band_info = BAND_INFO[band_key]
     flat_data = data.flatten()
     sample_size = min(100000, len(flat_data))
@@ -45,13 +44,12 @@ def get_band_stats(data, band_key):
     }
 
 def plot_band_histograms(bands, output_dir):
-    """Plot histograms for all bands"""
     plt.figure(figsize=(15, 8))
     for band_key, data in bands.items():
         if data is None:
             continue
         band_info = BAND_INFO[band_key]
-        sample = data[::10, ::10]  # Downsample
+        sample = data[::10, ::10]
         plt.hist(sample.flatten(), bins=100, alpha=0.5,
                  label=f"{band_info['name']} ({band_key})",
                  color=band_info['color'])
@@ -65,11 +63,10 @@ def plot_band_histograms(bands, output_dir):
     plt.close()
 
 def process_band(band_key, scene_dir):
-    """Process a single band with memory efficiency"""
     try:
         band_file = glob.glob(os.path.join(scene_dir, f"*{band_key}.TIF"))[0]
         with rasterio.open(band_file) as src:
-            if src.width * src.height > 10000000:  # Large image handling
+            if src.width * src.height > 10000000:
                 data = np.zeros((src.height, src.width), dtype=np.float32)
                 for ji, window in src.block_windows(1):
                     data[window.row_off:window.row_off + window.height,
@@ -78,13 +75,11 @@ def process_band(band_key, scene_dir):
                 data = src.read(1).astype(np.float32)
         return data
     except IndexError:
-        if band_key == "B10":  # Thermal is optional
+        if band_key == "B10":
             return None
         raise
 
 def analyze_correlations(bands, output_dir):
-    """Calculate and plot band correlations"""
-    # Filter out None values (missing thermal band)
     valid_bands = {k: v for k, v in bands.items() if v is not None}
     sample_size = min(10000, valid_bands['B2'].size)
     idx = np.random.choice(valid_bands['B2'].size, sample_size, replace=False)
@@ -107,7 +102,6 @@ def analyze_correlations(bands, output_dir):
     return corr_matrix
 
 def create_band_images(bands, output_dir):
-    """Create visualizations for each band"""
     for band_key in bands:
         if bands[band_key] is None:
             continue
@@ -116,10 +110,9 @@ def create_band_images(bands, output_dir):
         data = bands[band_key]
 
         plt.figure(figsize=(10, 8))
-        plt.imshow(data[::4, ::4], cmap='gray')  # Downsampled display
+        plt.imshow(data[::4, ::4], cmap='gray')
         plt.title(f"{band_info['name']} Band ({band_key})\n{band_info['wavelength']}", fontsize=14)
 
-        # Special scaling for thermal band
         if band_key == "B10":
             plt.colorbar(label='Temperature (°C)')
             vmin, vmax = np.percentile(data, [5, 95])
@@ -152,7 +145,6 @@ def main():
                 del bands[list(bands.keys())[0]]
                 gc.collect()
 
-        # Re-load all bands for final analysis
         bands = {b: process_band(b, PATHS["pre_kumbh"]) for b in BAND_INFO.keys()}
 
         print("\nAnalyzing band distributions...")
