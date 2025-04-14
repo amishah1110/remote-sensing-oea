@@ -3,9 +3,11 @@ import numpy as np
 import rasterio
 from rasterio.warp import reproject, Resampling
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
+from matplotlib.colors import ListedColormap, LinearSegmentedColormap
 import numpy.ma as ma
 import glob
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report
 
 # ==================== CONFIGURATION ====================
 PATHS = {
@@ -19,27 +21,38 @@ BAND_PATTERNS = {
     "green": "*B3.TIF",
     "red": "*B4.TIF",
     "nir": "*B5.TIF",
-    "swir1": "*B6.TIF"
+    "swir1": "*B6.TIF",
+    "thermal": "*B10.TIF"  # Landsat thermal band
 }
 
 PARAMS = {
     "target_resolution": 30,  # meters
-    "water_threshold": 0.1,
+    "water_threshold": 0.2,
     "risk_thresholds": {
         "low": (0.05, 0.15),
         "medium": (0.15, 0.25),
         "high": (0.25, 1.0)
+    },
+    "weights": {
+        "fmpi": 0.6,
+        "turbidity": 0.3,
+        "temperature": 0.1
     }
 }
 
+def create_turbidity_colormap():
+    """Create a custom colormap for turbidity visualization"""
+    colors = ["#8B4513", "#D2B48C", "#F5DEB3",  # Land colors (browns)
+              "#0066CC", "#0000FF", "#FF0000"]   # Water colors (blue to red)
+    return LinearSegmentedColormap.from_list("turbidity", colors)
 
-# ==================== CORE FUNCTIONS ====================
 def load_and_resize_band(band_key, scene_dir, reference_meta=None):
-    """Load and resize band to match reference dimensions"""
     matches = glob.glob(os.path.join(scene_dir, BAND_PATTERNS[band_key]))
     if not matches:
-        available = [f for f in os.listdir(scene_dir) if f.endswith('.TIF')]
-        raise FileNotFoundError(f"No {band_key} band found. Available files:\n - " + "\n - ".join(available))
+        if band_key != "thermal":  # Thermal is optional
+            available = [f for f in os.listdir(scene_dir) if f.endswith('.TIF')]
+            raise FileNotFoundError(f"No {band_key} band found. Available files:\n - " + "\n - ".join(available))
+        return None, None
 
     file_path = matches[0]
     print(f"Loading {band_key} band from: {os.path.basename(file_path)}")
@@ -60,32 +73,57 @@ def load_and_resize_band(band_key, scene_dir, reference_meta=None):
             )
             return data, reference_meta
 
-
-def compute_indices(green, nir, blue, swir1):
-    """Calculate all spectral indices with safe division"""
+def compute_indices(green, nir, blue, swir1, red=None, thermal=None):
     with np.errstate(divide='ignore', invalid='ignore'):
+        # Water and microplastic indices
         ndwi = (green - nir) / (green + nir)
         fmpi = (swir1 - (blue + green)) / (swir1 + (blue + green))
-    return {
-        "ndwi": np.nan_to_num(ndwi, nan=0.0),
-        "fmpi": np.nan_to_num(fmpi, nan=0.0)
-    }
 
+        # Additional environmental parameters
+        results = {
+            "ndwi": np.nan_to_num(ndwi, nan=0.0),
+            "fmpi": np.nan_to_num(fmpi, nan=0.0)
+        }
 
-def classify_pollution(fmpi, ndwi):
-    """Classify microplastic pollution risk levels with water masking"""
-    water_mask = ndwi > PARAMS["water_threshold"]
-    masked_fmpi = np.where(water_mask, fmpi, 0)
+        if red is not None:
+            # Turbidity Index (Normalized Difference Turbidity Index)
+            ndti = (red - green) / (red + green)
+            results["turbidity"] = np.nan_to_num(ndti, nan=0.0)
 
-    classified = np.zeros_like(masked_fmpi, dtype=np.uint8)
-    thresholds = PARAMS["risk_thresholds"]
+        if thermal is not None:
+            # Convert thermal band to temperature in °C (Landsat specific)
+            temperature = thermal * 0.1  # Scale factor for Landsat
+            results["temperature"] = temperature
 
-    classified[(masked_fmpi > thresholds["low"][0]) & (masked_fmpi <= thresholds["low"][1])] = 1
-    classified[(masked_fmpi > thresholds["medium"][0]) & (masked_fmpi <= thresholds["medium"][1])] = 2
-    classified[masked_fmpi > thresholds["high"][0]] = 3
+    return results
+
+def calculate_composite_risk(indices, weights):
+    """Calculate integrated risk score using weighted parameters"""
+    # Normalize all inputs to 0-1 range
+    fmpi_norm = (indices["fmpi"] - np.min(indices["fmpi"])) / (np.max(indices["fmpi"]) - np.min(indices["fmpi"]))
+    turb_norm = (indices["turbidity"] - np.min(indices["turbidity"])) / (
+            np.max(indices["turbidity"]) - np.min(indices["turbidity"]))
+    temp_norm = (indices["temperature"] - np.min(indices["temperature"])) / (
+            np.max(indices["temperature"]) - np.min(indices["temperature"]))
+
+    return (weights["fmpi"] * fmpi_norm +
+            weights["turbidity"] * turb_norm +
+            weights["temperature"] * temp_norm)
+
+def classify_pollution(composite_risk, ndwi):
+    water_mask = ndwi > -0.1  # Relaxed water mask
+
+    # Classify based on composite risk
+    low = (composite_risk > 0.1) & (composite_risk <= 0.3)
+    medium = (composite_risk > 0.3) & (composite_risk <= 0.6)
+    high = composite_risk > 0.6
+
+    classified = np.zeros_like(composite_risk, dtype=np.uint8)
+    classified[water_mask & low] = 1
+    classified[water_mask & medium] = 2
+    classified[water_mask & high] = 3
 
     return classified
-
 
 def plot_risk_distribution_percent_change(pre_stats, post_stats, output_dir):
     """Plot percentage change in risk levels between pre and post scenes"""
@@ -178,63 +216,60 @@ def analyze_band_correlations_fmpi(band_data, fmpi, output_dir):
     plt.close()
 
 
-def create_plot(data, title, filename, cmap="viridis", colorbar=True):
-    """Generate and save visualization plots"""
-    plt.figure(figsize=(12, 10))
 
-    if isinstance(cmap, ListedColormap):
+def save_visualization(data, title, filename, cmap="viridis", is_classified=False, vmin=None, vmax=None):
+    plt.figure(figsize=(12, 10), dpi=300)
+
+    if isinstance(cmap, str) and cmap == "turbidity":
+        cmap = create_turbidity_colormap()
+        # Special scaling for turbidity
+        water_mask = data > -0.5  # Simple water/land separation
+        water_values = data[water_mask]
+        if len(water_values) > 0:
+            vmin = np.percentile(water_values, 2)
+            vmax = np.percentile(water_values, 98)
+
+    if is_classified:
         masked = ma.masked_where(data == 0, data)
-        img = plt.imshow(masked, cmap=cmap)
+        img = plt.imshow(masked, cmap=cmap, interpolation='nearest', vmin=1, vmax=3)
+        cbar = plt.colorbar(img, ticks=[1, 2, 3], fraction=0.046, pad=0.04)
+        cbar.ax.set_yticklabels(['Low', 'Medium', 'High'])
     else:
-        img = plt.imshow(data, cmap=cmap)
-
-    if colorbar:
-        cbar = plt.colorbar(img)
-        if cmap == "RdYlGn_r":
-            cbar.set_label('Plastic Index Value')
+        img = plt.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax)
+        cbar = plt.colorbar(img, fraction=0.046, pad=0.04)
+        if cmap == "turbidity":
+            cbar.set_label('Turbidity Index (Land-Water)', rotation=270, labelpad=15)
 
     plt.title(title, fontsize=14, pad=20)
     plt.axis("off")
-    plt.tight_layout()
-    plt.savefig(os.path.join(PATHS["output"], filename), dpi=300, bbox_inches='tight')
+
+    png_path = os.path.join(PATHS["output"], filename)
+    plt.savefig(png_path, bbox_inches='tight', pad_inches=0.1, dpi=300)
     plt.close()
-
-
-def save_geotiff(output_path, data_array, meta, dtype=rasterio.uint8):
-    """Save the given array as a GeoTIFF file with the provided metadata"""
-    meta = meta.copy()
-    meta.update({
-        "driver": "GTiff",
-        "dtype": dtype,
-        "count": 1,
-        "compress": "lzw"
-    })
-
-    with rasterio.open(output_path, "w", **meta) as dst:
-        dst.write(data_array.astype(dtype), 1)
-
+    print(f"Saved visualization: {png_path}")
 
 def analyze_scene(scene_dir, scene_name, reference_meta=None):
-    """Complete processing pipeline for one scene with resizing"""
     print(f"\n{'=' * 50}")
     print(f"PROCESSING: {scene_name.upper()} SCENE")
-    print(f"Directory: {scene_dir}")
 
-    # Load all bands with consistent sizing
-    print("\nLoading and resizing bands...")
+    # Load all bands
     blue, meta = load_and_resize_band("blue", scene_dir, reference_meta)
     green, _ = load_and_resize_band("green", scene_dir, meta)
     red, _ = load_and_resize_band("red", scene_dir, meta)
     nir, _ = load_and_resize_band("nir", scene_dir, meta)
     swir1, _ = load_and_resize_band("swir1", scene_dir, meta)
+    thermal, _ = load_and_resize_band("thermal", scene_dir, meta)  # May be None
 
     # Compute indices
-    print("Calculating indices...")
-    indices = compute_indices(green, nir, blue, swir1)
+    indices = compute_indices(green, nir, blue, swir1, red, thermal)
 
-    # Classify pollution
-    print("Classifying pollution levels...")
-    classified = classify_pollution(indices["fmpi"], indices["ndwi"])
+    # Calculate composite risk if we have all parameters
+    if "turbidity" in indices and "temperature" in indices:
+        composite_risk = calculate_composite_risk(indices, PARAMS["weights"])
+        indices["composite_risk"] = composite_risk
+        classified = classify_pollution(composite_risk, indices["ndwi"])
+    else:
+        classified = classify_pollution(indices["fmpi"], indices["ndwi"])
 
     # Analyze band correlations
     print("Analyzing band correlations with NDWI...")
@@ -245,23 +280,24 @@ def analyze_scene(scene_dir, scene_name, reference_meta=None):
     analyze_band_correlations_fmpi(band_data, indices["fmpi"], PATHS["output"])
 
     # Generate visualizations
-    print("Creating visualizations...")
     colors = ['black', '#56b1f7', '#f7c842', '#e73030']
     cmap_custom = ListedColormap(colors)
 
-    create_plot(indices["ndwi"], f"NDWI - {scene_name}", f"ndwi_{scene_name}.png", "Blues")
-    create_plot(indices["fmpi"], f"FMPI - {scene_name}", f"fmpi_{scene_name}.png", "inferno")
-    create_plot(classified, f"Microplastic Risk - {scene_name}",
-                f"risk_{scene_name}.png", cmap_custom)
+    save_visualization(indices["ndwi"], f"NDWI - {scene_name}", f"ndwi_{scene_name}.png", "Blues")
+    save_visualization(indices["fmpi"], f"FMPI - {scene_name}", f"fmpi_{scene_name}.png", "inferno")
 
-    # Save results as GeoTIFFs
-    print("Saving GeoTIFF outputs...")
-    save_geotiff(os.path.join(PATHS["output"], f"ndwi_{scene_name}.tif"),
-                 indices["ndwi"], meta, dtype=rasterio.float32)
-    save_geotiff(os.path.join(PATHS["output"], f"fmpi_{scene_name}.tif"),
-                 indices["fmpi"], meta, dtype=rasterio.float32)
-    save_geotiff(os.path.join(PATHS["output"], f"risk_{scene_name}.tif"),
-                 classified, meta, dtype=rasterio.uint8)
+    if "turbidity" in indices:
+        save_visualization(indices["turbidity"], f"Turbidity - {scene_name}",
+                          f"turbidity_{scene_name}.png", "turbidity")
+    if "temperature" in indices:
+        save_visualization(indices["temperature"], f"Temperature - {scene_name}",
+                          f"temperature_{scene_name}.png", "hot")
+    if "composite_risk" in indices:
+        save_visualization(composite_risk, f"Composite Risk - {scene_name}",
+                          f"composite_risk_{scene_name}.png", "RdYlGn_r")
+
+    save_visualization(classified, f"Microplastic Risk - {scene_name}",
+                      f"risk_{scene_name}.png", cmap_custom, is_classified=True)
 
     # Calculate statistics
     stats = {
@@ -274,117 +310,74 @@ def analyze_scene(scene_dir, scene_name, reference_meta=None):
     print("\nAnalysis complete!")
     return {"classified": classified, "stats": stats, "indices": indices, "meta": meta}
 
-
 def compare_results(pre, post):
-    """Compare pre and post Kumbh results with size validation"""
+    """Compare results and save visualization"""
     print("\nCOMPARING RESULTS...")
-
-    # Verify shapes match
     if pre["classified"].shape != post["classified"].shape:
         raise ValueError(f"Shape mismatch: pre {pre['classified'].shape} vs post {post['classified'].shape}")
 
-    # Calculate change detection
     change = post["classified"] - pre["classified"]
-    increased = (change > 0).astype(int)
+    increased = (change > 0).astype(float)
 
-    # Create comparison plot
-    create_plot(increased, "Areas of Increased Microplastic Pollution",
-                "pollution_increase.png", "Reds")
-    save_geotiff(os.path.join(PATHS["output"], "pollution_increase.tif"),
-                 increased, pre["meta"], dtype=rasterio.uint8)
+    # Save visualization
+    save_visualization(increased, "Areas of Increased Microplastic Pollution",
+                      "pollution_increase.png", "RdYlGn_r")
 
-    # Plot risk distribution percentage change
-    plot_risk_distribution_percent_change(pre['stats'], post['stats'], PATHS["output"])
-
-    # Generate statistics
-    comparison_stats = {
+    return {
         "new_high_risk": np.sum((pre["classified"] < 3) & (post["classified"] == 3)),
         "total_increase": np.sum(increased),
         "percent_change": round((post["stats"]["high_risk"] - pre["stats"]["high_risk"]) /
-                                pre["stats"]["total_water"] * 100, 2)
+                              max(1, pre["stats"]["total_water"]) * 100, 2)
     }
 
-    return comparison_stats
-
-
-def run_full_analysis():
+if __name__ == "__main__":
     os.makedirs(PATHS["output"], exist_ok=True)
 
     try:
-        # Process pre-Kumbh scene first (will set reference size)
+        print("\nStarting Pre-Kumbh analysis...")
         pre = analyze_scene(PATHS["pre_kumbh"], "pre_kumbh")
 
-        # Process post-Kumbh scene using pre-Kumbh as reference
+        print("\nStarting Post-Kumbh analysis...")
         post = analyze_scene(PATHS["post_kumbh"], "post_kumbh", pre["meta"])
 
-        # Compare results
+        print("\nComparing results...")
         comparison = compare_results(pre, post)
 
-        # Random Forest Classification
-        print("\nTRAINING RANDOM FOREST ON PRE-KUMBH DATA...")
-        from sklearn.ensemble import RandomForestClassifier
-        from sklearn.metrics import accuracy_score, classification_report
-
-        # Prepare training data (only water pixels)
-        water_mask_pre = pre["indices"]["ndwi"] > PARAMS["water_threshold"]
+        # Machine Learning Evaluation
+        print("\nTRAINING RANDOM FOREST MODEL...")
         X_train = np.stack((
-            pre["indices"]["ndwi"][water_mask_pre].flatten(),
-            pre["indices"]["fmpi"][water_mask_pre].flatten()
+            pre["indices"]["ndwi"].flatten(),
+            pre["indices"]["fmpi"].flatten(),
+            pre["indices"].get("turbidity", np.zeros_like(pre["indices"]["ndwi"])).flatten(),
+            pre["indices"].get("temperature", np.zeros_like(pre["indices"]["ndwi"])).flatten()
         ), axis=1)
-        y_train = pre["classified"][water_mask_pre].flatten()
+        y_train = pre["classified"].flatten()
+        mask = y_train > 0
+        X_train, y_train = X_train[mask], y_train[mask]
 
-        rf_report = None
-        if len(X_train) > 0:
-            model = RandomForestClassifier(n_estimators=100, random_state=42)
-            model.fit(X_train, y_train)
+        model = RandomForestClassifier(n_estimators=100, random_state=42)
+        model.fit(X_train, y_train)
 
-            print("Predicting on POST-KUMBH data...")
-            water_mask_post = post["indices"]["ndwi"] > PARAMS["water_threshold"]
-            X_test = np.stack((
-                post["indices"]["ndwi"][water_mask_post].flatten(),
-                post["indices"]["fmpi"][water_mask_post].flatten()
-            ), axis=1)
-            y_test = post["classified"][water_mask_post].flatten()
+        X_test = np.stack((
+            post["indices"]["ndwi"].flatten(),
+            post["indices"]["fmpi"].flatten(),
+            post["indices"].get("turbidity", np.zeros_like(post["indices"]["ndwi"])).flatten(),
+            post["indices"].get("temperature", np.zeros_like(post["indices"]["ndwi"])).flatten()
+        ), axis=1)
+        y_test = post["classified"].flatten()
+        mask_test = y_test > 0
+        X_test, y_test = X_test[mask_test], y_test[mask_test]
 
-            if len(X_test) > 0:
-                y_pred = model.predict(X_test)
-                rf_report = classification_report(y_test, y_pred)
+        y_pred = model.predict(X_test)
+        print("\nModel Accuracy:", accuracy_score(y_test, y_pred))
+        print("\nClassification Report:\n", classification_report(y_test, y_pred))
 
-                print("\n=== RANDOM FOREST EVALUATION ===")
-                print("Accuracy:", accuracy_score(y_test, y_pred))
-                print("\nClassification Report:\n", rf_report)
-
-                # Save classification report
-                with open(os.path.join(PATHS["output"], "rf_classification_report.txt"), "w") as f:
-                    f.write(rf_report)
-            else:
-                print("Warning: No water pixels found in post-Kumbh scene for testing")
-        else:
-            print("Warning: No water pixels found in pre-Kumbh scene for training")
-
-        print("\n\nFINAL RESULTS:")
+        # Final report
+        print("\nFINAL RESULTS:")
         print(f"Pre-Kumbh High Risk Areas: {pre['stats']['high_risk']} pixels")
         print(f"Post-Kumbh High Risk Areas: {post['stats']['high_risk']} pixels")
-        print(f"New High Risk Areas Identified: {comparison['new_high_risk']} pixels")
+        print(f"New High Risk Areas: {comparison['new_high_risk']} pixels")
         print(f"Percentage Increase: {comparison['percent_change']}%")
-
-        print(f"\nAll results saved to: {PATHS['output']}")
-
-        return {
-            "pre": pre,
-            "post": post,
-            "comparison": comparison,
-            "rf_report": rf_report
-        }
 
     except Exception as e:
         print(f"\nERROR: {str(e)}")
-        print("Processing failed. Please check:")
-        print("1. All required band files exist in both directories")
-        print("2. Files follow the expected naming pattern")
-        print("3. Images cover the same geographic area")
-        return None
-
-
-if __name__ == "__main__":
-    run_full_analysis()
