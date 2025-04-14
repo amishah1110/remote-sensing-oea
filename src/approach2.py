@@ -40,11 +40,13 @@ PARAMS = {
     }
 }
 
+
 def create_turbidity_colormap():
     """Create a custom colormap for turbidity visualization"""
     colors = ["#8B4513", "#D2B48C", "#F5DEB3",  # Land colors (browns)
-              "#0066CC", "#0000FF", "#FF0000"]   # Water colors (blue to red)
+              "#0066CC", "#0000FF", "#FF0000"]  # Water colors (blue to red)
     return LinearSegmentedColormap.from_list("turbidity", colors)
+
 
 def load_and_resize_band(band_key, scene_dir, reference_meta=None):
     matches = glob.glob(os.path.join(scene_dir, BAND_PATTERNS[band_key]))
@@ -73,6 +75,7 @@ def load_and_resize_band(band_key, scene_dir, reference_meta=None):
             )
             return data, reference_meta
 
+
 def compute_indices(green, nir, blue, swir1, red=None, thermal=None):
     with np.errstate(divide='ignore', invalid='ignore'):
         # Water and microplastic indices
@@ -97,6 +100,7 @@ def compute_indices(green, nir, blue, swir1, red=None, thermal=None):
 
     return results
 
+
 def calculate_composite_risk(indices, weights):
     """Calculate integrated risk score using weighted parameters"""
     # Normalize all inputs to 0-1 range
@@ -109,6 +113,7 @@ def calculate_composite_risk(indices, weights):
     return (weights["fmpi"] * fmpi_norm +
             weights["turbidity"] * turb_norm +
             weights["temperature"] * temp_norm)
+
 
 def classify_pollution(composite_risk, ndwi):
     water_mask = ndwi > -0.1  # Relaxed water mask
@@ -124,6 +129,7 @@ def classify_pollution(composite_risk, ndwi):
     classified[water_mask & high] = 3
 
     return classified
+
 
 def plot_risk_distribution_percent_change(pre_stats, post_stats, output_dir):
     """Plot percentage change in risk levels between pre and post scenes"""
@@ -216,7 +222,6 @@ def analyze_band_correlations_fmpi(band_data, fmpi, output_dir):
     plt.close()
 
 
-
 def save_visualization(data, title, filename, cmap="viridis", is_classified=False, vmin=None, vmax=None):
     plt.figure(figsize=(12, 10), dpi=300)
 
@@ -247,6 +252,7 @@ def save_visualization(data, title, filename, cmap="viridis", is_classified=Fals
     plt.savefig(png_path, bbox_inches='tight', pad_inches=0.1, dpi=300)
     plt.close()
     print(f"Saved visualization: {png_path}")
+
 
 def analyze_scene(scene_dir, scene_name, reference_meta=None):
     print(f"\n{'=' * 50}")
@@ -288,16 +294,16 @@ def analyze_scene(scene_dir, scene_name, reference_meta=None):
 
     if "turbidity" in indices:
         save_visualization(indices["turbidity"], f"Turbidity - {scene_name}",
-                          f"turbidity_{scene_name}.png", "turbidity")
+                           f"turbidity_{scene_name}.png", "turbidity")
     if "temperature" in indices:
         save_visualization(indices["temperature"], f"Temperature - {scene_name}",
-                          f"temperature_{scene_name}.png", "hot")
+                           f"temperature_{scene_name}.png", "hot")
     if "composite_risk" in indices:
         save_visualization(composite_risk, f"Composite Risk - {scene_name}",
-                          f"composite_risk_{scene_name}.png", "RdYlGn_r")
+                           f"composite_risk_{scene_name}.png", "RdYlGn_r")
 
     save_visualization(classified, f"Microplastic Risk - {scene_name}",
-                      f"risk_{scene_name}.png", cmap_custom, is_classified=True)
+                       f"risk_{scene_name}.png", cmap_custom, is_classified=True)
 
     # Calculate statistics
     stats = {
@@ -310,6 +316,7 @@ def analyze_scene(scene_dir, scene_name, reference_meta=None):
     print("\nAnalysis complete!")
     return {"classified": classified, "stats": stats, "indices": indices, "meta": meta}
 
+
 def compare_results(pre, post):
     """Compare results and save visualization"""
     print("\nCOMPARING RESULTS...")
@@ -321,16 +328,20 @@ def compare_results(pre, post):
 
     # Save visualization
     save_visualization(increased, "Areas of Increased Microplastic Pollution",
-                      "pollution_increase.png", "RdYlGn_r")
+                       "pollution_increase.png", "RdYlGn_r")
+
+    # Plot risk distribution percentage change
+    plot_risk_distribution_percent_change(pre['stats'], post['stats'], PATHS["output"])
 
     return {
         "new_high_risk": np.sum((pre["classified"] < 3) & (post["classified"] == 3)),
         "total_increase": np.sum(increased),
         "percent_change": round((post["stats"]["high_risk"] - pre["stats"]["high_risk"]) /
-                              max(1, pre["stats"]["total_water"]) * 100, 2)
+                                max(1, pre["stats"]["total_water"]) * 100, 2)
     }
 
-if __name__ == "__main__":
+
+def run_full_analysis():
     os.makedirs(PATHS["output"], exist_ok=True)
 
     try:
@@ -369,8 +380,14 @@ if __name__ == "__main__":
         X_test, y_test = X_test[mask_test], y_test[mask_test]
 
         y_pred = model.predict(X_test)
+        rf_report = classification_report(y_test, y_pred)
+
         print("\nModel Accuracy:", accuracy_score(y_test, y_pred))
-        print("\nClassification Report:\n", classification_report(y_test, y_pred))
+        print("\nClassification Report:\n", rf_report)
+
+        # Save classification report
+        with open(os.path.join(PATHS["output"], "rf_classification_report.txt"), "w") as f:
+            f.write(rf_report)
 
         # Final report
         print("\nFINAL RESULTS:")
@@ -379,5 +396,17 @@ if __name__ == "__main__":
         print(f"New High Risk Areas: {comparison['new_high_risk']} pixels")
         print(f"Percentage Increase: {comparison['percent_change']}%")
 
+        return {
+            "pre": pre,
+            "post": post,
+            "comparison": comparison,
+            "rf_report": rf_report
+        }
+
     except Exception as e:
         print(f"\nERROR: {str(e)}")
+        return None
+
+
+if __name__ == "__main__":
+    run_full_analysis()

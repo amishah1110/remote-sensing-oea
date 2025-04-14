@@ -8,11 +8,12 @@ import pandas as pd
 from scipy.stats import pearsonr
 from tqdm import tqdm
 import gc
+import glob
 
 # Configuration
 PATHS = {
-    "pre_kumbh": r"C:\Users\amisa\PycharmProjects\RemoteSensing\pre_kumbh",
-    "output": r"C:\Users\amisa\PycharmProjects\RemoteSensing\band_analysis"
+    "pre_kumbh": r"D:\gdrive\RS OEA\remote-sensing-oea\pre_kumbh",
+    "output": r"D:\gdrive\RS OEA\remote-sensing-oea\band_analysis"
 }
 
 BAND_INFO = {
@@ -21,9 +22,8 @@ BAND_INFO = {
     "B4": {"name": "Red", "wavelength": "0.64-0.67μm", "color": "red"},
     "B5": {"name": "NIR", "wavelength": "0.85-0.88μm", "color": "darkred"},
     "B6": {"name": "SWIR1", "wavelength": "1.57-1.65μm", "color": "gray"},
-    "B10": {"name": "Thermal", "wavelength": "10.6-11.2μm", "color": "magenta"}  # Added thermal band
+    "B10": {"name": "Thermal", "wavelength": "10.6-11.2μm", "color": "magenta"}
 }
-
 
 def get_band_stats(data, band_key):
     """Calculate statistics for a band using chunking"""
@@ -39,14 +39,17 @@ def get_band_stats(data, band_key):
         'Std': np.std(sample),
         'Min': np.min(sample),
         '25%': np.percentile(sample, 25),
+        '50%': np.percentile(sample, 50),
+        '75%': np.percentile(sample, 75),
         'Max': np.max(sample)
     }
-
 
 def plot_band_histograms(bands, output_dir):
     """Plot histograms for all bands"""
     plt.figure(figsize=(15, 8))
     for band_key, data in bands.items():
+        if data is None:
+            continue
         band_info = BAND_INFO[band_key]
         sample = data[::10, ::10]  # Downsample
         plt.hist(sample.flatten(), bins=100, alpha=0.5,
@@ -60,7 +63,6 @@ def plot_band_histograms(bands, output_dir):
     plt.grid(True, alpha=0.3)
     plt.savefig(os.path.join(output_dir, 'band_histograms.png'), dpi=300, bbox_inches='tight')
     plt.close()
-
 
 def process_band(band_key, scene_dir):
     """Process a single band with memory efficiency"""
@@ -79,7 +81,6 @@ def process_band(band_key, scene_dir):
         if band_key == "B10":  # Thermal is optional
             return None
         raise
-
 
 def analyze_correlations(bands, output_dir):
     """Calculate and plot band correlations"""
@@ -104,7 +105,6 @@ def analyze_correlations(bands, output_dir):
     plt.savefig(os.path.join(output_dir, 'band_correlations.png'), dpi=300, bbox_inches='tight')
     plt.close()
     return corr_matrix
-
 
 def create_band_images(bands, output_dir):
     """Create visualizations for each band"""
@@ -132,7 +132,6 @@ def create_band_images(bands, output_dir):
         plt.savefig(os.path.join(output_dir, f'band_{band_key}_image.png'),
                     dpi=300, bbox_inches='tight')
         plt.close()
-
 
 def main():
     os.makedirs(PATHS["output"], exist_ok=True)
@@ -173,8 +172,5 @@ def main():
     except Exception as e:
         print(f"Error: {str(e)}")
 
-
 if __name__ == "__main__":
-    import glob
-
     main()

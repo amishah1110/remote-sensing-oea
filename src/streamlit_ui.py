@@ -1,5 +1,5 @@
 import streamlit as st
-from approach2 import analyze_scene, compare_results, PATHS
+from approach2 import run_full_analysis, PATHS
 import os
 from PIL import Image
 import pandas as pd
@@ -30,22 +30,25 @@ BAND_INFO = {
 
 def load_band(band_key, scene_dir):
     """Load a single band with memory efficiency"""
-    band_file = glob.glob(os.path.join(scene_dir, f"*{band_key}.TIF"))[0]
-    with rasterio.open(band_file) as src:
-        if src.width * src.height > 10000000:  # Large image - read in chunks
-            data = np.zeros((src.height, src.width), dtype=np.float32)
-            for ji, window in src.block_windows(1):
-                data[window.row_off:window.row_off + window.height,
-                window.col_off:window.col_off + window.width] = src.read(1, window=window)
-        else:
-            data = src.read(1).astype(np.float32)
-    return data
+    try:
+        band_file = glob.glob(os.path.join(scene_dir, f"*{band_key}.TIF"))[0]
+        with rasterio.open(band_file) as src:
+            if src.width * src.height > 10000000:  # Large image - read in chunks
+                data = np.zeros((src.height, src.width), dtype=np.float32)
+                for ji, window in src.block_windows(1):
+                    data[window.row_off:window.row_off + window.height,
+                    window.col_off:window.col_off + window.width] = src.read(1, window=window)
+            else:
+                data = src.read(1).astype(np.float32)
+        return data
+    except IndexError:
+        if band_key == "B10":  # Thermal is optional
+            return None
+        raise
 
 
 def run_band_analysis(scene_dir, output_dir):
     os.makedirs(output_dir, exist_ok=True)
-
-    # Load and process bands
     bands = {}
     stats = []
 
@@ -53,18 +56,18 @@ def run_band_analysis(scene_dir, output_dir):
         data = load_band(band_key, scene_dir)
         bands[band_key] = data
 
-        # Calculate statistics
-        sample = data[::10, ::10].flatten()  # Downsample for stats
-        stats.append({
-            'Band': BAND_INFO[band_key]['name'],
-            'Mean': np.mean(sample),
-            'Std': np.std(sample),
-            'Min': np.min(sample),
-            '25%': np.percentile(sample, 25),
-            '50%': np.percentile(sample, 50),
-            '75%': np.percentile(sample, 75),
-            'Max': np.max(sample)
-        })
+        if data is not None:
+            sample = data[::10, ::10].flatten()  # Downsample for stats
+            stats.append({
+                'Band': BAND_INFO[band_key]['name'],
+                'Mean': np.mean(sample),
+                'Std': np.std(sample),
+                'Min': np.min(sample),
+                '25%': np.percentile(sample, 25),
+                '50%': np.percentile(sample, 50),
+                '75%': np.percentile(sample, 75),
+                'Max': np.max(sample)
+            })
 
     # Save statistics
     stats_df = pd.DataFrame(stats).set_index('Band')
@@ -80,7 +83,9 @@ def create_band_visualizations(bands, output_dir):
     # Histograms
     plt.figure(figsize=(15, 8))
     for band_key, data in bands.items():
-        sample = data[::10, ::10].flatten()  # Downsample
+        if data is None:
+            continue
+        sample = data[::10, ::10].flatten()
         plt.hist(sample, bins=100, alpha=0.5,
                  label=f"{BAND_INFO[band_key]['name']} ({band_key})",
                  color=BAND_INFO[band_key]['color'])
@@ -94,30 +99,37 @@ def create_band_visualizations(bands, output_dir):
 
     # Band images
     for band_key, data in bands.items():
+        if data is None:
+            continue
         plt.figure(figsize=(10, 8))
-        plt.imshow(data[::4, ::4], cmap='gray')  # Downsample
+        plt.imshow(data[::4, ::4], cmap='gray')
         plt.title(f"{BAND_INFO[band_key]['name']} Band ({band_key})", fontsize=14)
-        plt.colorbar(label='Reflectance Value')
-        plt.axis('off')
-        vmin, vmax = np.percentile(data, [2, 98])
+        if band_key == "B10":
+            plt.colorbar(label='Temperature (°C)')
+            vmin, vmax = np.percentile(data, [5, 95])
+        else:
+            plt.colorbar(label='Reflectance (DN)')
+            vmin, vmax = np.percentile(data, [2, 98])
         plt.clim(vmin, vmax)
+        plt.axis('off')
         plt.savefig(os.path.join(output_dir, f'band_{band_key}_image.png'), dpi=300, bbox_inches='tight')
         plt.close()
 
     # Correlation matrix
-    sample_size = min(10000, bands['B2'].size)
-    idx = np.random.choice(bands['B2'].size, sample_size, replace=False)
-    sampled_data = {b: bands[b].flatten()[idx] for b in bands}
+    valid_bands = {k: v for k, v in bands.items() if v is not None}
+    sample_size = min(10000, valid_bands['B2'].size)
+    idx = np.random.choice(valid_bands['B2'].size, sample_size, replace=False)
+    sampled_data = {b: valid_bands[b].flatten()[idx] for b in valid_bands}
 
-    corr_matrix = np.zeros((len(bands), len(bands)))
-    for i, b1 in enumerate(bands):
-        for j, b2 in enumerate(bands):
+    corr_matrix = np.zeros((len(valid_bands), len(valid_bands)))
+    for i, b1 in enumerate(valid_bands):
+        for j, b2 in enumerate(valid_bands):
             corr_matrix[i, j] = pearsonr(sampled_data[b1], sampled_data[b2])[0]
 
     plt.figure(figsize=(10, 8))
     sns.heatmap(corr_matrix, annot=True, fmt=".2f", cmap='coolwarm',
-                xticklabels=[BAND_INFO[b]['name'] for b in bands],
-                yticklabels=[BAND_INFO[b]['name'] for b in bands],
+                xticklabels=[BAND_INFO[b]['name'] for b in valid_bands],
+                yticklabels=[BAND_INFO[b]['name'] for b in valid_bands],
                 vmin=-1, vmax=1, square=True)
     plt.title('Inter-band Correlation Matrix', fontsize=14)
     plt.savefig(os.path.join(output_dir, 'band_correlations.png'), dpi=300, bbox_inches='tight')
@@ -138,6 +150,7 @@ with tab1:
         with st.spinner("Analyzing spectral bands..."):
             try:
                 band_analysis_dir = os.path.join(PATHS["output"], "band_analysis")
+                os.makedirs(band_analysis_dir, exist_ok=True)
                 bands, stats_df = run_band_analysis(PATHS["pre_kumbh"], band_analysis_dir)
                 st.success("✅ Band analysis complete!")
 
@@ -156,10 +169,11 @@ with tab1:
                 st.subheader("🌌 Band Visualizations")
                 cols = st.columns(2)
                 for i, band_key in enumerate(BAND_INFO.keys()):
-                    with cols[i % 2]:
-                        img_path = os.path.join(band_analysis_dir, f'band_{band_key}_image.png')
-                        st.image(Image.open(img_path),
-                                 caption=f"{BAND_INFO[band_key]['name']} Band ({band_key}) - {BAND_INFO[band_key]['wavelength']}")
+                    img_path = os.path.join(band_analysis_dir, f'band_{band_key}_image.png')
+                    if os.path.exists(img_path):
+                        with cols[i % 2]:
+                            st.image(Image.open(img_path),
+                                     caption=f"{BAND_INFO[band_key]['name']} Band ({band_key}) - {BAND_INFO[band_key]['wavelength']}")
 
                 # Correlation matrix
                 st.subheader("🔄 Band Correlations")
@@ -196,20 +210,15 @@ with tab2:
     """)
 
     if st.button("🚀 Run Pollution Analysis", key="pollution_analysis"):
-        with st.spinner("Processing scenes..."):
-            try:
-                pre = analyze_scene(PATHS["pre_kumbh"], "pre_kumbh")
-                post = analyze_scene(PATHS["post_kumbh"], "post_kumbh", pre["meta"])
-                comparison = compare_results(pre, post)
+        with st.spinner("Processing scenes (this may take several minutes)..."):
+            results = run_full_analysis()
 
+            if results is not None:
                 st.success("✅ Analysis complete!")
+                pre = results["pre"]
+                post = results["post"]
+                comparison = results["comparison"]
 
-                # Show statistics
-                st.subheader("📊 Summary Results")
-                st.markdown(f"- Pre-Kumbh High Risk Areas: **{pre['stats']['high_risk']} pixels**")
-                st.markdown(f"- Post-Kumbh High Risk Areas: **{post['stats']['high_risk']} pixels**")
-                st.markdown(f"- New High Risk Areas: **{comparison['new_high_risk']} pixels**")
-                st.markdown(f"- Percentage Increase: **{comparison['percent_change']}%**")
                 # Show statistics
                 st.subheader("📊 Summary Results")
                 col1, col2 = st.columns(2)
@@ -223,31 +232,6 @@ with tab2:
                 # Display result images with insights
                 st.subheader("🖼 Results Visualization")
 
-                # Display result images
-                st.subheader("🖼️ Results Visualization")
-                col1, col2 = st.columns(2)
-
-                result_images = [
-                    ("NDWI (Pre-Kumbh)", "ndwi_pre_kumbh.png"),
-                    ("NDWI (Post-Kumbh)", "ndwi_post_kumbh.png"),
-                    ("FMPI (Pre-Kumbh)", "fmpi_pre_kumbh.png"),
-                    ("FMPI (Post-Kumbh)", "fmpi_post_kumbh.png"),
-                    ("Risk Map (Pre-Kumbh)", "risk_pre_kumbh.png"),
-                    ("Risk Map (Post-Kumbh)", "risk_post_kumbh.png"),
-                    ("Turbidity Map (Pre-Kumbh", "turbidity_pre_kumbh.png"),
-                    ("Turbidity Map (Post-Kumbh", "turbidity_post_kumbh.png"),
-                    ("Pollution Increase", "pollution_increase.png")
-                ]
-
-                for i, (title, filename) in enumerate(result_images):
-                    image_path = os.path.join(PATHS["output"], filename)
-                    if os.path.exists(image_path):
-                        with (col1 if i % 2 == 0 else col2):
-                            st.image(Image.open(image_path),
-                                     caption=title,
-                                     use_container_width=True)
-                    else:
-                        st.warning(f"Missing: {filename}")
                 # NDWI Plots
                 st.markdown("### Water Detection (NDWI)")
                 cols = st.columns(2)
@@ -270,8 +254,6 @@ with tab2:
                     - Temporary water bodies from event activities may appear
                     """)
 
-            except Exception as e:
-                st.error(f"❌ Error occurred: {str(e)}")
                 # FMPI Plots
                 st.markdown("### Microplastic Index (FMPI)")
                 cols = st.columns(2)
@@ -362,7 +344,7 @@ with tab2:
                     """)
 
                 # Random Forest Results
-                if results["rf_report"] is not None:
+                if results.get("rf_report"):
                     st.subheader("🌲 Random Forest Classification")
                     st.code(results["rf_report"], language='text')
                     st.markdown("""
