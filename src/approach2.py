@@ -1,4 +1,3 @@
-
 import os
 import numpy as np
 import rasterio
@@ -34,7 +33,7 @@ PARAMS = {
 }
 
 
-# ==================== ENHANCED CORE FUNCTIONS ====================
+# ==================== CORE FUNCTIONS ====================
 def load_and_resize_band(band_key, scene_dir, reference_meta=None):
     """Load and resize band to match reference dimensions"""
     matches = glob.glob(os.path.join(scene_dir, BAND_PATTERNS[band_key]))
@@ -47,10 +46,8 @@ def load_and_resize_band(band_key, scene_dir, reference_meta=None):
 
     with rasterio.open(file_path) as src:
         if reference_meta is None:
-            # First image - return as is
             return src.read(1).astype(np.float32), src.meta
         else:
-            # Resize to match reference image
             data = np.empty((reference_meta['height'], reference_meta['width']), dtype=np.float32)
             reproject(
                 rasterio.band(src, 1),
@@ -83,16 +80,104 @@ def classify_pollution(fmpi, ndwi):
     classified = np.zeros_like(masked_fmpi, dtype=np.uint8)
     thresholds = PARAMS["risk_thresholds"]
 
-    classified[(masked_fmpi > thresholds["low"][0]) &
-               (masked_fmpi <= thresholds["low"][1])] = 1
-    classified[(masked_fmpi > thresholds["medium"][0]) &
-               (masked_fmpi <= thresholds["medium"][1])] = 2
+    classified[(masked_fmpi > thresholds["low"][0]) & (masked_fmpi <= thresholds["low"][1])] = 1
+    classified[(masked_fmpi > thresholds["medium"][0]) & (masked_fmpi <= thresholds["medium"][1])] = 2
     classified[masked_fmpi > thresholds["high"][0]] = 3
 
     return classified
 
 
-# ==================== VISUALIZATION ====================
+def plot_risk_distribution_percent_change(pre_stats, post_stats, output_dir):
+    """Plot percentage change in risk levels between pre and post scenes"""
+    labels = ['Low', 'Medium', 'High']
+    pre = np.array([pre_stats['low_risk'], pre_stats['medium_risk'], pre_stats['high_risk']])
+    post = np.array([post_stats['low_risk'], post_stats['medium_risk'], post_stats['high_risk']])
+    percent_change = ((post - pre) / (pre + 1e-6)) * 100
+
+    plt.figure(figsize=(8, 5), dpi=120)
+    bars = plt.bar(labels, percent_change, color=['#56b1f7', '#f7c842', '#e73030'])
+    plt.axhline(0, color='gray', linewidth=0.8, linestyle='--')
+    plt.ylabel('Percentage Change (%)')
+    plt.title('Percentage Change in Microplastic Risk Levels (Post vs Pre)')
+    plt.grid(axis='y', linestyle='--', alpha=0.6)
+
+    for bar in bars:
+        height = bar.get_height()
+        plt.annotate(f'{height:.1f}%',
+                     xy=(bar.get_x() + bar.get_width() / 2, height),
+                     xytext=(0, 4),
+                     textcoords="offset points",
+                     ha='center', va='bottom', fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "risk_percentage_change.png"))
+    plt.close()
+
+
+def analyze_band_correlations_ndwi(band_data, ndwi, output_dir):
+    """Analyze correlation between bands and NDWI"""
+    from scipy.stats import pearsonr
+
+    band_names = []
+    correlation_values = []
+
+    for band_key, band_array in band_data.items():
+        flat_band = band_array.flatten()
+        flat_ndwi = ndwi.flatten()
+        valid_mask = ~np.isnan(flat_band) & ~np.isnan(flat_ndwi)
+        corr, _ = pearsonr(flat_band[valid_mask], flat_ndwi[valid_mask])
+        band_names.append(band_key.upper())
+        correlation_values.append(corr)
+
+    plt.figure(figsize=(8, 5), dpi=120)
+    bars = plt.bar(band_names, correlation_values, color='teal')
+    plt.axhline(0, color='gray', linestyle='--', linewidth=0.8)
+    plt.ylabel('Pearson Correlation')
+    plt.title('Correlation of Bands with NDWI')
+    plt.grid(axis='y', linestyle='--', alpha=0.6)
+
+    for bar in bars:
+        yval = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width() / 2, yval, f'{yval:.2f}',
+                 ha='center', va='bottom', fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "band_ndwi_correlation.png"))
+    plt.close()
+
+
+def analyze_band_correlations_fmpi(band_data, fmpi, output_dir):
+    """Analyze correlation between bands and FMPI"""
+    from scipy.stats import pearsonr
+
+    band_names = []
+    correlation_values = []
+
+    for band_key, band_array in band_data.items():
+        flat_band = band_array.flatten()
+        flat_fmpi = fmpi.flatten()
+        valid_mask = ~np.isnan(flat_band) & ~np.isnan(flat_fmpi)
+        corr, _ = pearsonr(flat_band[valid_mask], flat_fmpi[valid_mask])
+        band_names.append(band_key.upper())
+        correlation_values.append(corr)
+
+    plt.figure(figsize=(8, 5), dpi=120)
+    bars = plt.bar(band_names, correlation_values, color='darkorange')
+    plt.axhline(0, color='gray', linestyle='--', linewidth=0.8)
+    plt.ylabel('Pearson Correlation')
+    plt.title('Correlation of Bands with FMPI')
+    plt.grid(axis='y', linestyle='--', alpha=0.6)
+
+    for bar in bars:
+        yval = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width() / 2, yval, f'{yval:.2f}',
+                 ha='center', va='bottom', fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "band_fmpi_correlation.png"))
+    plt.close()
+
+
 def create_plot(data, title, filename, cmap="viridis", colorbar=True):
     """Generate and save visualization plots"""
     plt.figure(figsize=(12, 10))
@@ -114,6 +199,7 @@ def create_plot(data, title, filename, cmap="viridis", colorbar=True):
     plt.savefig(os.path.join(PATHS["output"], filename), dpi=300, bbox_inches='tight')
     plt.close()
 
+
 def save_geotiff(output_path, data_array, meta, dtype=rasterio.uint8):
     """Save the given array as a GeoTIFF file with the provided metadata"""
     meta = meta.copy()
@@ -128,7 +214,6 @@ def save_geotiff(output_path, data_array, meta, dtype=rasterio.uint8):
         dst.write(data_array.astype(dtype), 1)
 
 
-# ==================== ANALYSIS PIPELINE ====================
 def analyze_scene(scene_dir, scene_name, reference_meta=None):
     """Complete processing pipeline for one scene with resizing"""
     print(f"\n{'=' * 50}")
@@ -151,6 +236,14 @@ def analyze_scene(scene_dir, scene_name, reference_meta=None):
     print("Classifying pollution levels...")
     classified = classify_pollution(indices["fmpi"], indices["ndwi"])
 
+    # Analyze band correlations
+    print("Analyzing band correlations with NDWI...")
+    band_data = {"blue": blue, "green": green, "red": red, "nir": nir, "swir1": swir1}
+    analyze_band_correlations_ndwi(band_data, indices["ndwi"], PATHS["output"])
+
+    print("Analyzing band correlations with FMPI...")
+    analyze_band_correlations_fmpi(band_data, indices["fmpi"], PATHS["output"])
+
     # Generate visualizations
     print("Creating visualizations...")
     colors = ['black', '#56b1f7', '#f7c842', '#e73030']
@@ -163,10 +256,12 @@ def analyze_scene(scene_dir, scene_name, reference_meta=None):
 
     # Save results as GeoTIFFs
     print("Saving GeoTIFF outputs...")
-    save_geotiff(os.path.join(PATHS["output"], f"ndwi_{scene_name}.tif"), indices["ndwi"], meta, dtype=rasterio.float32)
-    save_geotiff(os.path.join(PATHS["output"], f"fmpi_{scene_name}.tif"), indices["fmpi"], meta, dtype=rasterio.float32)
-    save_geotiff(os.path.join(PATHS["output"], f"risk_{scene_name}.tif"), classified, meta, dtype=rasterio.uint8)
-
+    save_geotiff(os.path.join(PATHS["output"], f"ndwi_{scene_name}.tif"),
+                 indices["ndwi"], meta, dtype=rasterio.float32)
+    save_geotiff(os.path.join(PATHS["output"], f"fmpi_{scene_name}.tif"),
+                 indices["fmpi"], meta, dtype=rasterio.float32)
+    save_geotiff(os.path.join(PATHS["output"], f"risk_{scene_name}.tif"),
+                 classified, meta, dtype=rasterio.uint8)
 
     # Calculate statistics
     stats = {
@@ -195,9 +290,11 @@ def compare_results(pre, post):
     # Create comparison plot
     create_plot(increased, "Areas of Increased Microplastic Pollution",
                 "pollution_increase.png", "Reds")
-    # Save the change detection result as GeoTIFF
-    save_geotiff(os.path.join(PATHS["output"], "pollution_increase.tif"), increased, pre["meta"], dtype=rasterio.uint8)
+    save_geotiff(os.path.join(PATHS["output"], "pollution_increase.tif"),
+                 increased, pre["meta"], dtype=rasterio.uint8)
 
+    # Plot risk distribution percentage change
+    plot_risk_distribution_percent_change(pre['stats'], post['stats'], PATHS["output"])
 
     # Generate statistics
     comparison_stats = {
@@ -210,8 +307,7 @@ def compare_results(pre, post):
     return comparison_stats
 
 
-# ==================== MAIN EXECUTION ====================
-if __name__ == "__main__":
+def run_full_analysis():
     os.makedirs(PATHS["output"], exist_ok=True)
 
     try:
@@ -224,50 +320,48 @@ if __name__ == "__main__":
         # Compare results
         comparison = compare_results(pre, post)
 
-        # ==================== RANDOM FOREST CLASSIFICATION ====================
+        # Random Forest Classification
+        print("\nTRAINING RANDOM FOREST ON PRE-KUMBH DATA...")
         from sklearn.ensemble import RandomForestClassifier
         from sklearn.metrics import accuracy_score, classification_report
 
-        print("\nTRAINING RANDOM FOREST ON PRE-KUMBH DATA...")
-
-        # Prepare training data (flattened)
+        # Prepare training data (only water pixels)
+        water_mask_pre = pre["indices"]["ndwi"] > PARAMS["water_threshold"]
         X_train = np.stack((
-            pre["indices"]["ndwi"].flatten(),
-            pre["indices"]["fmpi"].flatten()
+            pre["indices"]["ndwi"][water_mask_pre].flatten(),
+            pre["indices"]["fmpi"][water_mask_pre].flatten()
         ), axis=1)
-        y_train = pre["classified"].flatten()
+        y_train = pre["classified"][water_mask_pre].flatten()
 
-        unique, counts = np.unique(y_train, return_counts=True)
-        print("Label distribution in training data:", dict(zip(unique, counts)))
+        rf_report = None
+        if len(X_train) > 0:
+            model = RandomForestClassifier(n_estimators=100, random_state=42)
+            model.fit(X_train, y_train)
 
-        # Filter out non-water or non-risk areas (label 0)
-        mask = y_train > 0
-        X_train = X_train[mask]
-        y_train = y_train[mask]
+            print("Predicting on POST-KUMBH data...")
+            water_mask_post = post["indices"]["ndwi"] > PARAMS["water_threshold"]
+            X_test = np.stack((
+                post["indices"]["ndwi"][water_mask_post].flatten(),
+                post["indices"]["fmpi"][water_mask_post].flatten()
+            ), axis=1)
+            y_test = post["classified"][water_mask_post].flatten()
 
-        model = RandomForestClassifier(n_estimators=100, random_state=42)
-        model.fit(X_train, y_train)
+            if len(X_test) > 0:
+                y_pred = model.predict(X_test)
+                rf_report = classification_report(y_test, y_pred)
 
-        print("Predicting on POST-KUMBH data...")
-        X_test = np.stack((
-            post["indices"]["ndwi"].flatten(),
-            post["indices"]["fmpi"].flatten()
-        ), axis=1)
-        y_test = post["classified"].flatten()
-        unique, counts = np.unique(y_test, return_counts=True)
-        print("Label distribution in training data:", dict(zip(unique, counts)))
+                print("\n=== RANDOM FOREST EVALUATION ===")
+                print("Accuracy:", accuracy_score(y_test, y_pred))
+                print("\nClassification Report:\n", rf_report)
 
-        mask_test = y_test > 0
-        X_test = X_test[mask_test]
-        y_test = y_test[mask_test]
+                # Save classification report
+                with open(os.path.join(PATHS["output"], "rf_classification_report.txt"), "w") as f:
+                    f.write(rf_report)
+            else:
+                print("Warning: No water pixels found in post-Kumbh scene for testing")
+        else:
+            print("Warning: No water pixels found in pre-Kumbh scene for training")
 
-        y_pred = model.predict(X_test)
-
-        print("\n=== RANDOM FOREST EVALUATION ===")
-        print("Accuracy:", accuracy_score(y_test, y_pred))
-        print("\nClassification Report:\n", classification_report(y_test, y_pred))
-
-        # Generate final report
         print("\n\nFINAL RESULTS:")
         print(f"Pre-Kumbh High Risk Areas: {pre['stats']['high_risk']} pixels")
         print(f"Post-Kumbh High Risk Areas: {post['stats']['high_risk']} pixels")
@@ -276,9 +370,21 @@ if __name__ == "__main__":
 
         print(f"\nAll results saved to: {PATHS['output']}")
 
+        return {
+            "pre": pre,
+            "post": post,
+            "comparison": comparison,
+            "rf_report": rf_report
+        }
+
     except Exception as e:
         print(f"\nERROR: {str(e)}")
         print("Processing failed. Please check:")
         print("1. All required band files exist in both directories")
         print("2. Files follow the expected naming pattern")
         print("3. Images cover the same geographic area")
+        return None
+
+
+if __name__ == "__main__":
+    run_full_analysis()
